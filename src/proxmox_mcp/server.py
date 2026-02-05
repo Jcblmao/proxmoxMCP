@@ -20,8 +20,8 @@ import sys
 import signal
 from typing import Optional, List, Annotated, Literal
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.tools import Tool
+from fastmcp import FastMCP
+from fastmcp.tools import Tool
 from mcp.types import TextContent as Content
 from pydantic import Field, BaseModel
 from fastapi import Body
@@ -37,6 +37,7 @@ from .tools.containers import ContainerTools
 from .tools.snapshots import SnapshotTools
 from .tools.iso import ISOTools
 from .tools.backup import BackupTools
+from .tools.zfs import ZFSTools
 from .tools.definitions import (
     GET_NODES_DESC,
     GET_NODE_STATUS_DESC,
@@ -72,6 +73,12 @@ from .tools.definitions import (
     CREATE_BACKUP_DESC,
     RESTORE_BACKUP_DESC,
     DELETE_BACKUP_DESC,
+    # ZFS tools
+    LIST_ZFS_POOLS_DESC,
+    GET_ZFS_POOL_STATUS_DESC,
+    LIST_ZFS_DATASETS_DESC,
+    GET_DISK_LIST_DESC,
+    GET_STORAGE_USAGE_DESC,
 )
 
 class ProxmoxMCPServer:
@@ -99,6 +106,7 @@ class ProxmoxMCPServer:
         self.snapshot_tools = SnapshotTools(self.proxmox)
         self.iso_tools = ISOTools(self.proxmox)
         self.backup_tools = BackupTools(self.proxmox)
+        self.zfs_tools = ZFSTools(self.proxmox)
 
         # Initialize MCP server
         self.mcp = FastMCP(
@@ -437,6 +445,41 @@ class ProxmoxMCPServer:
             volid: Annotated[str, Field(description="Backup volume ID to delete")],
         ):
             return self.backup_tools.delete_backup(node=node, storage=storage, volid=volid)
+
+        # ZFS tools
+        @self.mcp.tool(description=LIST_ZFS_POOLS_DESC)
+        def list_zfs_pools(
+            node: Annotated[Optional[str], Field(description="Filter by node (optional)", default=None)] = None,
+        ):
+            return self.zfs_tools.list_zfs_pools(node=node)
+
+        @self.mcp.tool(description=GET_ZFS_POOL_STATUS_DESC)
+        def get_zfs_pool_status(
+            node: Annotated[str, Field(description="Node name where the pool is located (e.g. 'pve')")],
+            pool_name: Annotated[str, Field(description="Name of the ZFS pool (e.g. 'rpool', 'tank')")],
+        ):
+            return self.zfs_tools.get_zfs_pool_status(node=node, pool_name=pool_name)
+
+        @self.mcp.tool(description=LIST_ZFS_DATASETS_DESC)
+        def list_zfs_datasets(
+            node: Annotated[str, Field(description="Node name to query (e.g. 'pve')")],
+            pool_name: Annotated[Optional[str], Field(description="Filter by pool name (optional)", default=None)] = None,
+        ):
+            return self.zfs_tools.list_zfs_datasets(node=node, pool_name=pool_name)
+
+        @self.mcp.tool(description=GET_DISK_LIST_DESC)
+        def get_disk_list(
+            node: Annotated[str, Field(description="Node name to query (e.g. 'pve')")],
+            include_partitions: Annotated[bool, Field(description="Include partition information", default=False)] = False,
+        ):
+            return self.zfs_tools.get_disk_list(node=node, include_partitions=include_partitions)
+
+        @self.mcp.tool(description=GET_STORAGE_USAGE_DESC)
+        def get_storage_usage(
+            node: Annotated[str, Field(description="Node name to query (e.g. 'pve')")],
+            storage: Annotated[Optional[str], Field(description="Filter by specific storage pool (optional)", default=None)] = None,
+        ):
+            return self.zfs_tools.get_storage_usage(node=node, storage=storage)
 
 
     def start(self) -> None:

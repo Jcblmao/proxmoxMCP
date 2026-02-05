@@ -49,7 +49,8 @@ class ProxmoxTool:
         Args:
             data: Raw data from Proxmox API to format
             resource_type: Type of resource for template selection. Valid types:
-                         'nodes', 'node_status', 'vms', 'storage', 'containers', 'cluster'
+                         'nodes', 'node_status', 'vms', 'storage', 'containers',
+                         'cluster', 'zfs_pools', 'zfs_pool_detail', 'zfs_datasets', 'disks'
 
         Returns:
             List of Content objects formatted according to resource type
@@ -70,6 +71,16 @@ class ProxmoxTool:
             formatted = ProxmoxTemplates.container_list(data)
         elif resource_type == "cluster":
             formatted = ProxmoxTemplates.cluster_status(data)
+        elif resource_type == "zfs_pools":
+            formatted = ProxmoxTemplates.zfs_pool_list(data)
+        elif resource_type == "zfs_pool_detail":
+            formatted = ProxmoxTemplates.zfs_pool_detail(data)
+        elif resource_type == "zfs_datasets":
+            formatted = ProxmoxTemplates.zfs_datasets(data)
+        elif resource_type == "disks":
+            formatted = ProxmoxTemplates.disk_list(data)
+        elif resource_type == "storage_usage":
+            formatted = ProxmoxTemplates.storage_usage(data)
         else:
             # Fallback to JSON formatting for unknown types
             import json

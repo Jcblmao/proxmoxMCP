@@ -193,6 +193,89 @@ GET_STORAGE_DESC = """List storage pools across the cluster with their usage and
 Example:
 {"storage": "local-lvm", "type": "lvm", "used": "500GB", "total": "1TB"}"""
 
+# ZFS tool descriptions
+LIST_ZFS_POOLS_DESC = """List ZFS storage pools on Proxmox nodes.
+
+Parameters:
+node - Filter by node (optional, lists all nodes if not specified)
+
+Returns ZFS pools with:
+- Pool name and health status (ONLINE, DEGRADED, FAULTED)
+- Size, allocated space, and free space
+- Fragmentation percentage
+- Deduplication ratio
+
+Example:
+{"name": "rpool", "node": "pve", "health": "ONLINE", "size": "1TB", "alloc": "500GB", "free": "500GB", "frag": "10%"}
+"""
+
+GET_ZFS_POOL_STATUS_DESC = """Get detailed status of a specific ZFS pool.
+
+Parameters:
+node* - Node name where the pool is located (e.g. 'pve')
+pool_name* - Name of the ZFS pool (e.g. 'rpool', 'tank')
+
+Returns detailed pool information:
+- Health and state
+- Disk layout (mirror, raidz, etc.)
+- Individual disk status
+- Scan/scrub status
+- Any errors
+
+Example:
+get_zfs_pool_status node='pve' pool_name='rpool'
+"""
+
+LIST_ZFS_DATASETS_DESC = """List ZFS datasets on a node.
+
+Parameters:
+node* - Node name to query (e.g. 'pve')
+pool_name - Filter by pool name (optional)
+
+Returns ZFS datasets with:
+- Dataset name and type
+- Used and referenced space
+- Available space
+- Mount point
+
+Example:
+list_zfs_datasets node='pve' pool_name='tank'
+"""
+
+GET_DISK_LIST_DESC = """List all disks on a node.
+
+Parameters:
+node* - Node name to query (e.g. 'pve')
+include_partitions - Include partition information (optional, default: false)
+
+Returns disk information:
+- Device path and size
+- Serial number and model
+- Type (SSD/HDD) and RPM
+- Health status and wear level
+- Current usage (ZFS pool member, etc.)
+
+Example:
+get_disk_list node='pve' include_partitions=false
+"""
+
+GET_STORAGE_USAGE_DESC = """Get detailed storage usage breakdown showing what's consuming space.
+
+Parameters:
+node* - Node name to query (e.g. 'pve')
+storage - Filter by specific storage pool (optional, shows all if not specified)
+
+Returns detailed breakdown including:
+- Total, used, and available space per storage
+- List of all volumes/disk images sorted by size
+- Volume details: VM ID, format, size, content type
+- Helps identify what's using the most space
+
+Example:
+get_storage_usage node='pve'
+get_storage_usage node='pve' storage='local-lvm'
+"""
+
 # Cluster tool descriptions
 GET_CLUSTER_STATUS_DESC = """Get overall Proxmox cluster health and configuration status.
 
