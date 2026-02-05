@@ -125,8 +125,32 @@ class ZFSTools(ProxmoxTool):
         try:
             pool_detail = self.proxmox.nodes(node).disks.zfs(pool_name).get()
 
-            # Handle case where API returns string (raw zpool status output)
-            if isinstance(pool_detail, str):
+            # Debug: Log the actual API response type and content
+            self.logger.debug(
+                "ZFS pool detail response - type: %s, value: %r",
+                type(pool_detail).__name__,
+                pool_detail,
+            )
+
+            # Handle None response
+            if pool_detail is None:
+                self.logger.warning(
+                    "ZFS pool detail returned None for %s/%s", node, pool_name
+                )
+                result = {
+                    "name": pool_name,
+                    "node": node,
+                    "health": "UNKNOWN",
+                    "state": "API returned no data",
+                    "scan": {},
+                    "action": None,
+                    "status": None,
+                    "errors": "No data returned from API",
+                    "children": [],
+                }
+            # Handle string response (raw zpool status output)
+            elif isinstance(pool_detail, str):
+                self.logger.debug("ZFS pool detail is string, parsing health...")
                 # Parse health from raw output if possible
                 health = "UNKNOWN"
                 if "ONLINE" in pool_detail:
@@ -148,8 +172,9 @@ class ZFSTools(ProxmoxTool):
                     "children": [],
                     "raw_status": pool_detail,
                 }
-            else:
-                # Original dict handling
+            # Handle dict response (expected structured data)
+            elif isinstance(pool_detail, dict):
+                self.logger.debug("ZFS pool detail is dict, extracting fields...")
                 result = {
                     "name": pool_name,
                     "node": node,
@@ -161,7 +186,29 @@ class ZFSTools(ProxmoxTool):
                     "errors": pool_detail.get("errors", "No known data errors"),
                     "children": pool_detail.get("children", []),
                 }
+            # Handle unexpected types (list, etc.)
+            else:
+                self.logger.error(
+                    "Unexpected ZFS pool detail type for %s/%s: %s - %r",
+                    node,
+                    pool_name,
+                    type(pool_detail).__name__,
+                    pool_detail,
+                )
+                result = {
+                    "name": pool_name,
+                    "node": node,
+                    "health": "UNKNOWN",
+                    "state": f"Unexpected type: {type(pool_detail).__name__}",
+                    "scan": {},
+                    "action": None,
+                    "status": None,
+                    "errors": f"API returned unexpected type: {type(pool_detail).__name__}",
+                    "children": [],
+                    "raw_status": str(pool_detail),
+                }
 
+            self.logger.debug("ZFS pool result: %r", result)
             return self._format_response(result, "zfs_pool_detail")
         except Exception as e:
             self._handle_error(f"get ZFS pool status for {pool_name}", e)

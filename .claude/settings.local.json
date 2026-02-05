@@ -61,7 +61,9 @@
       "WebFetch(domain:developer.1password.com)",
       "Bash(/c/Windows/System32/OpenSSH/ssh.exe:*)",
       "Bash(ssh.exe:*)",
-      "Bash(ssh-add.exe -l:*)"
+      "Bash(ssh-add.exe -l:*)",
+      "Bash(source:*)",
+      "Bash(python3:*)"
     ]
   }
 }
