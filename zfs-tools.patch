@@ -1,0 +1,923 @@
+From 8c9128925779bef548377cdd861ba3850087e5e8 Mon Sep 17 00:00:00 2001
+From: Jacob Newman <jacob@renada.co.uk>
+Date: Thu, 5 Feb 2026 11:01:49 +0000
+Subject: [PATCH] Add ZFS storage tools and fix pool status bug
+
+New features:
+- list_zfs_pools: List all ZFS pools across nodes with health, size, usage
+- get_zfs_pool_status: Get detailed pool status (handles string API responses)
+- list_zfs_datasets: List ZFS datasets with usage info
+- get_disk_list: List all disks on a node with health status
+- get_storage_usage: Detailed storage breakdown showing space consumers
+
+Bug fixes:
+- Fixed get_zfs_pool_status crashing when API returns string instead of dict
+- Added fallback parsing for raw zpool status output
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+---
+ src/proxmox_mcp/formatting/templates.py | 280 ++++++++++++++++++--
+ src/proxmox_mcp/server.py               |  47 +++-
+ src/proxmox_mcp/tools/base.py           |  13 +-
+ src/proxmox_mcp/tools/definitions.py    |  83 ++++++
+ src/proxmox_mcp/tools/zfs.py            | 334 ++++++++++++++++++++++++
+ 5 files changed, 728 insertions(+), 29 deletions(-)
+ create mode 100644 src/proxmox_mcp/tools/zfs.py
+
+diff --git a/src/proxmox_mcp/formatting/templates.py b/src/proxmox_mcp/formatting/templates.py
+index 5b6e1ab..6b02118 100644
+--- a/src/proxmox_mcp/formatting/templates.py
++++ b/src/proxmox_mcp/formatting/templates.py
+@@ -36,10 +36,10 @@ class ProxmoxTemplates:
+             result.extend([
+                 "",  # Empty line between nodes
+                 f"{ProxmoxTheme.RESOURCES['node']} {node['node']}",
+-                f"  • Status: {status.upper()}",
+-                f"  • Uptime: {ProxmoxFormatters.format_uptime(node.get('uptime', 0))}",
+-                f"  • CPU Cores: {node.get('maxcpu', 'N/A')}",
+-                f"  • Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
++                f"  - Status: {status.upper()}",
++                f"  - Uptime: {ProxmoxFormatters.format_uptime(node.get('uptime', 0))}",
++                f"  - CPU Cores: {node.get('maxcpu', 'N/A')}",
++                f"  - Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
+                 f"{ProxmoxFormatters.format_bytes(memory_total)} ({memory_percent:.1f}%)"
+             ])
+             
+@@ -50,7 +50,7 @@ class ProxmoxTemplates:
+                 disk_total = disk.get("total", 0)
+                 disk_percent = (disk_used / disk_total * 100) if disk_total > 0 else 0
+                 result.append(
+-                    f"  • Disk: {ProxmoxFormatters.format_bytes(disk_used)} / "
++                    f"  - Disk: {ProxmoxFormatters.format_bytes(disk_used)} / "
+                     f"{ProxmoxFormatters.format_bytes(disk_total)} ({disk_percent:.1f}%)"
+                 )
+             
+@@ -74,10 +74,10 @@ class ProxmoxTemplates:
+         
+         result = [
+             f"{ProxmoxTheme.RESOURCES['node']} Node: {node}",
+-            f"  • Status: {status.get('status', 'unknown').upper()}",
+-            f"  • Uptime: {ProxmoxFormatters.format_uptime(status.get('uptime', 0))}",
+-            f"  • CPU Cores: {status.get('maxcpu', 'N/A')}",
+-            f"  • Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
++            f"  - Status: {status.get('status', 'unknown').upper()}",
++            f"  - Uptime: {ProxmoxFormatters.format_uptime(status.get('uptime', 0))}",
++            f"  - CPU Cores: {status.get('maxcpu', 'N/A')}",
++            f"  - Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
+             f"{ProxmoxFormatters.format_bytes(memory_total)} ({memory_percent:.1f}%)"
+         ]
+         
+@@ -88,7 +88,7 @@ class ProxmoxTemplates:
+             disk_total = disk.get("total", 0)
+             disk_percent = (disk_used / disk_total * 100) if disk_total > 0 else 0
+             result.append(
+-                f"  • Disk: {ProxmoxFormatters.format_bytes(disk_used)} / "
++                f"  - Disk: {ProxmoxFormatters.format_bytes(disk_used)} / "
+                 f"{ProxmoxFormatters.format_bytes(disk_total)} ({disk_percent:.1f}%)"
+             )
+         
+@@ -115,10 +115,10 @@ class ProxmoxTemplates:
+             result.extend([
+                 "",  # Empty line between VMs
+                 f"{ProxmoxTheme.RESOURCES['vm']} {vm['name']} (ID: {vm['vmid']})",
+-                f"  • Status: {vm['status'].upper()}",
+-                f"  • Node: {vm['node']}",
+-                f"  • CPU Cores: {vm.get('cpus', 'N/A')}",
+-                f"  • Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
++                f"  - Status: {vm['status'].upper()}",
++                f"  - Node: {vm['node']}",
++                f"  - CPU Cores: {vm.get('cpus', 'N/A')}",
++                f"  - Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
+                 f"{ProxmoxFormatters.format_bytes(memory_total)} ({memory_percent:.1f}%)"
+             ])
+             
+@@ -144,9 +144,9 @@ class ProxmoxTemplates:
+             result.extend([
+                 "",  # Empty line between storage pools
+                 f"{ProxmoxTheme.RESOURCES['storage']} {store['storage']}",
+-                f"  • Status: {store.get('status', 'unknown').upper()}",
+-                f"  • Type: {store['type']}",
+-                f"  • Usage: {ProxmoxFormatters.format_bytes(used)} / "
++                f"  - Status: {store.get('status', 'unknown').upper()}",
++                f"  - Type: {store['type']}",
++                f"  - Usage: {ProxmoxFormatters.format_bytes(used)} / "
+                 f"{ProxmoxFormatters.format_bytes(total)} ({percent:.1f}%)"
+             ])
+             
+@@ -176,10 +176,10 @@ class ProxmoxTemplates:
+             result.extend([
+                 "",  # Empty line between containers
+                 f"{ProxmoxTheme.RESOURCES['container']} {container['name']} (ID: {container['vmid']})",
+-                f"  • Status: {container['status'].upper()}",
+-                f"  • Node: {container['node']}",
+-                f"  • CPU Cores: {container.get('cpus', 'N/A')}",
+-                f"  • Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
++                f"  - Status: {container['status'].upper()}",
++                f"  - Node: {container['node']}",
++                f"  - CPU Cores: {container.get('cpus', 'N/A')}",
++                f"  - Memory: {ProxmoxFormatters.format_bytes(memory_used)} / "
+                 f"{ProxmoxFormatters.format_bytes(memory_total)} ({memory_percent:.1f}%)"
+             ])
+             
+@@ -200,14 +200,242 @@ class ProxmoxTemplates:
+         # Basic cluster info
+         result.extend([
+             "",
+-            f"  • Name: {status.get('name', 'N/A')}",
+-            f"  • Quorum: {'OK' if status.get('quorum') else 'NOT OK'}",
+-            f"  • Nodes: {status.get('nodes', 0)}",
++            f"  - Name: {status.get('name', 'N/A')}",
++            f"  - Quorum: {'OK' if status.get('quorum') else 'NOT OK'}",
++            f"  - Nodes: {status.get('nodes', 0)}",
+         ])
+         
+         # Add resource count if available
+         resources = status.get('resources', [])
+         if resources:
+-            result.append(f"  • Resources: {len(resources)}")
+-        
++            result.append(f"  - Resources: {len(resources)}")
++
++        return "\n".join(result)
++
++    @staticmethod
++    def zfs_pool_list(pools: List[Dict[str, Any]]) -> str:
++        """Template for ZFS pool list output.
++
++        Args:
++            pools: List of ZFS pool data dictionaries
++
++        Returns:
++            Formatted ZFS pool list string
++        """
++        if not pools:
++            return f"{ProxmoxTheme.RESOURCES['zfs']} No ZFS pools found"
++
++        result = [f"{ProxmoxTheme.RESOURCES['zfs']} ZFS Storage Pools"]
++
++        for pool in pools:
++            health = pool.get("health", "UNKNOWN")
++            health_icon = "🟢" if health == "ONLINE" else "🟡" if health == "DEGRADED" else "🔴"
++
++            size = pool.get("size", 0)
++            alloc = pool.get("alloc", 0)
++            free = pool.get("free", 0)
++            frag = pool.get("frag", 0)
++            dedup = pool.get("dedup", 1.0)
++
++            # Calculate percentage
++            percent = (alloc / size * 100) if size > 0 else 0
++
++            result.extend([
++                "",
++                f"{ProxmoxTheme.RESOURCES['zfs']} {pool['name']} ({pool.get('node', 'unknown')})",
++                f"  - Health: {health_icon} {health}",
++                f"  - Size: {ProxmoxFormatters.format_bytes(size)}",
++                f"  - Used: {ProxmoxFormatters.format_bytes(alloc)} ({percent:.1f}%)",
++                f"  - Free: {ProxmoxFormatters.format_bytes(free)}",
++                f"  - Fragmentation: {frag}%",
++            ])
++
++            if dedup and dedup != 1.0:
++                result.append(f"  - Dedup Ratio: {dedup:.2f}x")
++
++        return "\n".join(result)
++
++    @staticmethod
++    def zfs_pool_detail(pool: Dict[str, Any]) -> str:
++        """Template for detailed ZFS pool status output.
++
++        Args:
++            pool: ZFS pool detail data
++
++        Returns:
++            Formatted ZFS pool detail string
++        """
++        health = pool.get("health", "UNKNOWN")
++        health_icon = "🟢" if health == "ONLINE" else "🟡" if health == "DEGRADED" else "🔴"
++
++        result = [
++            f"{ProxmoxTheme.RESOURCES['zfs']} ZFS Pool: {pool.get('name', 'unknown')}",
++            f"  - Node: {pool.get('node', 'unknown')}",
++            f"  - Health: {health_icon} {health}",
++            f"  - State: {pool.get('state', 'UNKNOWN')}",
++        ]
++
++        # Add scan info if available
++        scan = pool.get("scan", {})
++        if scan:
++            result.append(f"  - Last Scan: {scan.get('function', 'none')} - {scan.get('state', 'unknown')}")
++
++        # Add errors
++        errors = pool.get("errors", "No known data errors")
++        result.append(f"  - Errors: {errors}")
++
++        # Add disk layout
++        children = pool.get("children", [])
++        if children:
++            result.append("")
++            result.append("  Disk Layout:")
++            for child in children:
++                child_name = child.get("name", "unknown")
++                child_state = child.get("state", "UNKNOWN")
++                state_icon = "🟢" if child_state == "ONLINE" else "🟡" if child_state == "DEGRADED" else "🔴"
++                result.append(f"    - {child_name}: {state_icon} {child_state}")
++
++                # Nested children (for mirrors, raidz)
++                for subchild in child.get("children", []):
++                    sub_name = subchild.get("name", "unknown")
++                    sub_state = subchild.get("state", "UNKNOWN")
++                    sub_icon = "🟢" if sub_state == "ONLINE" else "🟡" if sub_state == "DEGRADED" else "🔴"
++                    result.append(f"      - {sub_name}: {sub_icon} {sub_state}")
++
++        # Add raw status output if available (fallback when structured data unavailable)
++        raw_status = pool.get("raw_status")
++        if raw_status:
++            result.append("")
++            result.append("  Raw Pool Status:")
++            for line in raw_status.split('\n'):
++                if line.strip():
++                    result.append(f"    {line}")
++
++        return "\n".join(result)
++
++    @staticmethod
++    def zfs_datasets(datasets: List[Dict[str, Any]]) -> str:
++        """Template for ZFS datasets output.
++
++        Args:
++            datasets: List of ZFS dataset data dictionaries
++
++        Returns:
++            Formatted ZFS datasets string
++        """
++        if not datasets:
++            return f"{ProxmoxTheme.RESOURCES['zfs']} No ZFS datasets found"
++
++        result = [f"{ProxmoxTheme.RESOURCES['zfs']} ZFS Datasets"]
++
++        for ds in datasets:
++            used = ds.get("used", 0)
++            avail = ds.get("avail", 0)
++
++            result.extend([
++                "",
++                f"  {ProxmoxTheme.RESOURCES['storage']} {ds.get('name', 'unknown')}",
++                f"     - Type: {ds.get('type', 'filesystem')}",
++                f"     - Used: {ProxmoxFormatters.format_bytes(used)}",
++                f"     - Available: {ProxmoxFormatters.format_bytes(avail)}",
++                f"     - Mountpoint: {ds.get('mountpoint', 'N/A')}",
++            ])
++
++        return "\n".join(result)
++
++    @staticmethod
++    def disk_list(disks: List[Dict[str, Any]]) -> str:
++        """Template for disk list output.
++
++        Args:
++            disks: List of disk data dictionaries
++
++        Returns:
++            Formatted disk list string
++        """
++        if not disks:
++            return f"{ProxmoxTheme.RESOURCES['disk']} No disks found"
++
++        result = [f"{ProxmoxTheme.RESOURCES['disk']} Disks"]
++
++        for disk in disks:
++            health = disk.get("health", "UNKNOWN")
++            health_icon = "🟢" if health == "PASSED" or health == "OK" else "🟡" if health == "UNKNOWN" else "🔴"
++
++            disk_type = disk.get("type", "unknown")
++            type_icon = "⚡" if disk_type == "ssd" else "💿"
++
++            size = disk.get("size", 0)
++            used = disk.get("used", "unused")
++
++            result.extend([
++                "",
++                f"  {type_icon} {disk.get('devpath', 'unknown')}",
++                f"     - Size: {ProxmoxFormatters.format_bytes(size)}",
++                f"     - Model: {disk.get('model', 'N/A')}",
++                f"     - Serial: {disk.get('serial', 'N/A')}",
++                f"     - Health: {health_icon} {health}",
++                f"     - Usage: {used}",
++            ])
++
++            # Add wear level for SSDs
++            wearout = disk.get("wearout", "N/A")
++            if wearout != "N/A" and disk_type == "ssd":
++                result.append(f"     - Wear Level: {wearout}%")
++
++        return "\n".join(result)
++
++    @staticmethod
++    def storage_usage(storages: List[Dict[str, Any]]) -> str:
++        """Template for detailed storage usage breakdown.
++
++        Args:
++            storages: List of storage usage data dictionaries
++
++        Returns:
++            Formatted storage usage string
++        """
++        if not storages:
++            return f"{ProxmoxTheme.RESOURCES['storage']} No storage data found"
++
++        result = [f"{ProxmoxTheme.RESOURCES['storage']} Storage Usage Breakdown"]
++
++        for store in storages:
++            total = store.get("total", 0)
++            used = store.get("used", 0)
++            avail = store.get("available", 0)
++            percent = (used / total * 100) if total > 0 else 0
++
++            result.extend([
++                "",
++                f"{ProxmoxTheme.RESOURCES['storage']} {store['storage']} ({store.get('type', 'unknown')})",
++                f"  Total: {ProxmoxFormatters.format_bytes(total)}",
++                f"  Used: {ProxmoxFormatters.format_bytes(used)} ({percent:.1f}%)",
++                f"  Available: {ProxmoxFormatters.format_bytes(avail)}",
++                f"  Volumes: {store.get('volume_count', 0)}",
++            ])
++
++            # List top volumes by size
++            volumes = store.get("volumes", [])
++            if volumes:
++                result.append("")
++                result.append("  Top Space Consumers:")
++                # Show top 10 or fewer
++                for vol in volumes[:10]:
++                    size = vol.get("size", 0)
++                    vmid = vol.get("vmid")
++                    content = vol.get("content", "unknown")
++                    volid = vol.get("volid", "unknown")
++
++                    # Extract just the volume name from volid for cleaner display
++                    vol_name = volid.split("/")[-1] if "/" in volid else volid.split(":")[-1]
++
++                    vmid_str = f" (VM {vmid})" if vmid else ""
++                    result.append(
++                        f"    - {vol_name}{vmid_str}: {ProxmoxFormatters.format_bytes(size)} [{content}]"
++                    )
++
++                if len(volumes) > 10:
++                    result.append(f"    ... and {len(volumes) - 10} more volumes")
++
+         return "\n".join(result)
+diff --git a/src/proxmox_mcp/server.py b/src/proxmox_mcp/server.py
+index 1959a62..f7fe3ba 100644
+--- a/src/proxmox_mcp/server.py
++++ b/src/proxmox_mcp/server.py
+@@ -20,8 +20,8 @@ import sys
+ import signal
+ from typing import Optional, List, Annotated, Literal
+ 
+-from mcp.server.fastmcp import FastMCP
+-from mcp.server.fastmcp.tools import Tool
++from fastmcp import FastMCP
++from fastmcp.tools import Tool
+ from mcp.types import TextContent as Content
+ from pydantic import Field, BaseModel
+ from fastapi import Body
+@@ -37,6 +37,7 @@ from .tools.containers import ContainerTools
+ from .tools.snapshots import SnapshotTools
+ from .tools.iso import ISOTools
+ from .tools.backup import BackupTools
++from .tools.zfs import ZFSTools
+ from .tools.definitions import (
+     GET_NODES_DESC,
+     GET_NODE_STATUS_DESC,
+@@ -72,6 +73,12 @@ from .tools.definitions import (
+     CREATE_BACKUP_DESC,
+     RESTORE_BACKUP_DESC,
+     DELETE_BACKUP_DESC,
++    # ZFS tools
++    LIST_ZFS_POOLS_DESC,
++    GET_ZFS_POOL_STATUS_DESC,
++    LIST_ZFS_DATASETS_DESC,
++    GET_DISK_LIST_DESC,
++    GET_STORAGE_USAGE_DESC,
+ )
+ 
+ class ProxmoxMCPServer:
+@@ -99,6 +106,7 @@ class ProxmoxMCPServer:
+         self.snapshot_tools = SnapshotTools(self.proxmox)
+         self.iso_tools = ISOTools(self.proxmox)
+         self.backup_tools = BackupTools(self.proxmox)
++        self.zfs_tools = ZFSTools(self.proxmox)
+ 
+         # Initialize MCP server
+         self.mcp = FastMCP(
+@@ -438,6 +446,41 @@ class ProxmoxMCPServer:
+         ):
+             return self.backup_tools.delete_backup(node=node, storage=storage, volid=volid)
+ 
++        # ZFS tools
++        @self.mcp.tool(description=LIST_ZFS_POOLS_DESC)
++        def list_zfs_pools(
++            node: Annotated[Optional[str], Field(description="Filter by node (optional)", default=None)] = None,
++        ):
++            return self.zfs_tools.list_zfs_pools(node=node)
++
++        @self.mcp.tool(description=GET_ZFS_POOL_STATUS_DESC)
++        def get_zfs_pool_status(
++            node: Annotated[str, Field(description="Node name where the pool is located (e.g. 'pve')")],
++            pool_name: Annotated[str, Field(description="Name of the ZFS pool (e.g. 'rpool', 'tank')")],
++        ):
++            return self.zfs_tools.get_zfs_pool_status(node=node, pool_name=pool_name)
++
++        @self.mcp.tool(description=LIST_ZFS_DATASETS_DESC)
++        def list_zfs_datasets(
++            node: Annotated[str, Field(description="Node name to query (e.g. 'pve')")],
++            pool_name: Annotated[Optional[str], Field(description="Filter by pool name (optional)", default=None)] = None,
++        ):
++            return self.zfs_tools.list_zfs_datasets(node=node, pool_name=pool_name)
++
++        @self.mcp.tool(description=GET_DISK_LIST_DESC)
++        def get_disk_list(
++            node: Annotated[str, Field(description="Node name to query (e.g. 'pve')")],
++            include_partitions: Annotated[bool, Field(description="Include partition information", default=False)] = False,
++        ):
++            return self.zfs_tools.get_disk_list(node=node, include_partitions=include_partitions)
++
++        @self.mcp.tool(description=GET_STORAGE_USAGE_DESC)
++        def get_storage_usage(
++            node: Annotated[str, Field(description="Node name to query (e.g. 'pve')")],
++            storage: Annotated[Optional[str], Field(description="Filter by specific storage pool (optional)", default=None)] = None,
++        ):
++            return self.zfs_tools.get_storage_usage(node=node, storage=storage)
++
+ 
+     def start(self) -> None:
+         """Start the MCP server.
+diff --git a/src/proxmox_mcp/tools/base.py b/src/proxmox_mcp/tools/base.py
+index 978b59e..9a42ed8 100644
+--- a/src/proxmox_mcp/tools/base.py
++++ b/src/proxmox_mcp/tools/base.py
+@@ -49,7 +49,8 @@ class ProxmoxTool:
+         Args:
+             data: Raw data from Proxmox API to format
+             resource_type: Type of resource for template selection. Valid types:
+-                         'nodes', 'node_status', 'vms', 'storage', 'containers', 'cluster'
++                         'nodes', 'node_status', 'vms', 'storage', 'containers',
++                         'cluster', 'zfs_pools', 'zfs_pool_detail', 'zfs_datasets', 'disks'
+ 
+         Returns:
+             List of Content objects formatted according to resource type
+@@ -70,6 +71,16 @@ class ProxmoxTool:
+             formatted = ProxmoxTemplates.container_list(data)
+         elif resource_type == "cluster":
+             formatted = ProxmoxTemplates.cluster_status(data)
++        elif resource_type == "zfs_pools":
++            formatted = ProxmoxTemplates.zfs_pool_list(data)
++        elif resource_type == "zfs_pool_detail":
++            formatted = ProxmoxTemplates.zfs_pool_detail(data)
++        elif resource_type == "zfs_datasets":
++            formatted = ProxmoxTemplates.zfs_datasets(data)
++        elif resource_type == "disks":
++            formatted = ProxmoxTemplates.disk_list(data)
++        elif resource_type == "storage_usage":
++            formatted = ProxmoxTemplates.storage_usage(data)
+         else:
+             # Fallback to JSON formatting for unknown types
+             import json
+diff --git a/src/proxmox_mcp/tools/definitions.py b/src/proxmox_mcp/tools/definitions.py
+index 3be2dec..bdefdca 100644
+--- a/src/proxmox_mcp/tools/definitions.py
++++ b/src/proxmox_mcp/tools/definitions.py
+@@ -193,6 +193,89 @@ GET_STORAGE_DESC = """List storage pools across the cluster with their usage and
+ Example:
+ {"storage": "local-lvm", "type": "lvm", "used": "500GB", "total": "1TB"}"""
+ 
++# ZFS tool descriptions
++LIST_ZFS_POOLS_DESC = """List ZFS storage pools on Proxmox nodes.
++
++Parameters:
++node - Filter by node (optional, lists all nodes if not specified)
++
++Returns ZFS pools with:
++- Pool name and health status (ONLINE, DEGRADED, FAULTED)
++- Size, allocated space, and free space
++- Fragmentation percentage
++- Deduplication ratio
++
++Example:
++{"name": "rpool", "node": "pve", "health": "ONLINE", "size": "1TB", "alloc": "500GB", "free": "500GB", "frag": "10%"}
++"""
++
++GET_ZFS_POOL_STATUS_DESC = """Get detailed status of a specific ZFS pool.
++
++Parameters:
++node* - Node name where the pool is located (e.g. 'pve')
++pool_name* - Name of the ZFS pool (e.g. 'rpool', 'tank')
++
++Returns detailed pool information:
++- Health and state
++- Disk layout (mirror, raidz, etc.)
++- Individual disk status
++- Scan/scrub status
++- Any errors
++
++Example:
++get_zfs_pool_status node='pve' pool_name='rpool'
++"""
++
++LIST_ZFS_DATASETS_DESC = """List ZFS datasets on a node.
++
++Parameters:
++node* - Node name to query (e.g. 'pve')
++pool_name - Filter by pool name (optional)
++
++Returns ZFS datasets with:
++- Dataset name and type
++- Used and referenced space
++- Available space
++- Mount point
++
++Example:
++list_zfs_datasets node='pve' pool_name='tank'
++"""
++
++GET_DISK_LIST_DESC = """List all disks on a node.
++
++Parameters:
++node* - Node name to query (e.g. 'pve')
++include_partitions - Include partition information (optional, default: false)
++
++Returns disk information:
++- Device path and size
++- Serial number and model
++- Type (SSD/HDD) and RPM
++- Health status and wear level
++- Current usage (ZFS pool member, etc.)
++
++Example:
++get_disk_list node='pve' include_partitions=false
++"""
++
++GET_STORAGE_USAGE_DESC = """Get detailed storage usage breakdown showing what's consuming space.
++
++Parameters:
++node* - Node name to query (e.g. 'pve')
++storage - Filter by specific storage pool (optional, shows all if not specified)
++
++Returns detailed breakdown including:
++- Total, used, and available space per storage
++- List of all volumes/disk images sorted by size
++- Volume details: VM ID, format, size, content type
++- Helps identify what's using the most space
++
++Example:
++get_storage_usage node='pve'
++get_storage_usage node='pve' storage='local-lvm'
++"""
++
+ # Cluster tool descriptions
+ GET_CLUSTER_STATUS_DESC = """Get overall Proxmox cluster health and configuration status.
+ 
+diff --git a/src/proxmox_mcp/tools/zfs.py b/src/proxmox_mcp/tools/zfs.py
+new file mode 100644
+index 0000000..a3c92c2
+--- /dev/null
++++ b/src/proxmox_mcp/tools/zfs.py
+@@ -0,0 +1,334 @@
++"""
++ZFS storage pool tools for Proxmox MCP.
++
++This module provides tools for managing and monitoring ZFS storage pools:
++- Listing all ZFS pools across nodes
++- Retrieving detailed pool information including:
++  * Pool health status
++  * Disk composition and layout
++  * Usage statistics (used, available, fragmentation)
++  * Dataset information
++- Listing ZFS datasets with usage details
++
++The tools implement fallback mechanisms for scenarios where
++detailed ZFS information might be temporarily unavailable.
++"""
++from typing import List, Optional
++from mcp.types import TextContent as Content
++from .base import ProxmoxTool
++
++
++class ZFSTools(ProxmoxTool):
++    """Tools for managing Proxmox ZFS storage pools.
++
++    Provides functionality for:
++    - Retrieving ZFS pool information across cluster nodes
++    - Monitoring pool health and status
++    - Tracking pool utilization and capacity
++    - Viewing ZFS datasets and their usage
++
++    Implements fallback mechanisms for scenarios where detailed
++    ZFS information might be temporarily unavailable.
++    """
++
++    def list_zfs_pools(self, node: Optional[str] = None) -> List[Content]:
++        """List ZFS storage pools on Proxmox nodes.
++
++        Retrieves comprehensive information for each ZFS pool including:
++        - Pool name and health status
++        - Size, allocated space, and free space
++        - Fragmentation percentage
++        - Deduplication ratio
++        - Disk composition
++
++        Args:
++            node: Optional node name to filter. If not provided,
++                  lists pools from all nodes.
++
++        Returns:
++            List of Content objects containing formatted ZFS pool information:
++            {
++                "name": "pool-name",
++                "node": "node-name",
++                "health": "ONLINE/DEGRADED/FAULTED",
++                "size": bytes,
++                "alloc": bytes,
++                "free": bytes,
++                "frag": percentage,
++                "dedup": ratio
++            }
++
++        Raises:
++            RuntimeError: If the ZFS pool query fails
++        """
++        try:
++            pools = []
++
++            # Get list of nodes to query
++            if node:
++                nodes_to_query = [{"node": node}]
++            else:
++                nodes_to_query = self.proxmox.nodes.get()
++
++            for node_info in nodes_to_query:
++                node_name = node_info["node"]
++                try:
++                    # Query ZFS pools on this node
++                    zfs_pools = self.proxmox.nodes(node_name).disks.zfs.get()
++
++                    for pool in zfs_pools:
++                        pool_data = {
++                            "name": pool.get("name", "unknown"),
++                            "node": node_name,
++                            "health": pool.get("health", "UNKNOWN"),
++                            "size": pool.get("size", 0),
++                            "alloc": pool.get("alloc", 0),
++                            "free": pool.get("free", 0),
++                            "frag": pool.get("frag", 0),
++                            "dedup": pool.get("dedup", 1.0),
++                        }
++                        pools.append(pool_data)
++
++                except Exception as node_error:
++                    self.logger.warning(
++                        "Could not query ZFS pools on node %s: %s",
++                        node_name,
++                        node_error,
++                    )
++                    continue
++
++            return self._format_response(pools, "zfs_pools")
++        except Exception as e:
++            self._handle_error("list ZFS pools", e)
++
++    def get_zfs_pool_status(self, node: str, pool_name: str) -> List[Content]:
++        """Get detailed status of a specific ZFS pool.
++
++        Retrieves detailed information for a ZFS pool including:
++        - Health status and state
++        - Disk layout (mirror, raidz, etc.)
++        - Individual disk status
++        - Scan/scrub status
++        - Errors if any
++
++        Args:
++            node: Node name where the pool is located
++            pool_name: Name of the ZFS pool
++
++        Returns:
++            List of Content objects containing detailed pool status
++
++        Raises:
++            RuntimeError: If the pool status query fails
++            ValueError: If the pool is not found
++        """
++        try:
++            pool_detail = self.proxmox.nodes(node).disks.zfs(pool_name).get()
++
++            # Handle case where API returns string (raw zpool status output)
++            if isinstance(pool_detail, str):
++                # Parse health from raw output if possible
++                health = "UNKNOWN"
++                if "ONLINE" in pool_detail:
++                    health = "ONLINE"
++                elif "DEGRADED" in pool_detail:
++                    health = "DEGRADED"
++                elif "FAULTED" in pool_detail:
++                    health = "FAULTED"
++
++                result = {
++                    "name": pool_name,
++                    "node": node,
++                    "health": health,
++                    "state": "See raw output",
++                    "scan": {},
++                    "action": None,
++                    "status": None,
++                    "errors": "Check raw output",
++                    "children": [],
++                    "raw_status": pool_detail,
++                }
++            else:
++                # Original dict handling
++                result = {
++                    "name": pool_name,
++                    "node": node,
++                    "health": pool_detail.get("health", "UNKNOWN"),
++                    "state": pool_detail.get("state", "UNKNOWN"),
++                    "scan": pool_detail.get("scan", {}),
++                    "action": pool_detail.get("action", None),
++                    "status": pool_detail.get("status", None),
++                    "errors": pool_detail.get("errors", "No known data errors"),
++                    "children": pool_detail.get("children", []),
++                }
++
++            return self._format_response(result, "zfs_pool_detail")
++        except Exception as e:
++            self._handle_error(f"get ZFS pool status for {pool_name}", e)
++
++    def list_zfs_datasets(self, node: str, pool_name: Optional[str] = None) -> List[Content]:
++        """List ZFS datasets on a node.
++
++        Retrieves information about ZFS datasets including:
++        - Dataset name and type
++        - Used space and referenced space
++        - Available space
++        - Mount point
++        - Compression ratio
++
++        Args:
++            node: Node name to query
++            pool_name: Optional pool name to filter datasets
++
++        Returns:
++            List of Content objects containing ZFS dataset information
++
++        Raises:
++            RuntimeError: If the dataset query fails
++        """
++        try:
++            # Use the Proxmox API to get dataset information
++            # Note: Proxmox API may not expose all ZFS dataset info directly
++            # We'll get what's available through the disks/zfs endpoint
++            datasets = []
++
++            zfs_pools = self.proxmox.nodes(node).disks.zfs.get()
++
++            for pool in zfs_pools:
++                if pool_name and pool.get("name") != pool_name:
++                    continue
++
++                pool_info = {
++                    "name": pool.get("name", "unknown"),
++                    "type": "filesystem",
++                    "used": pool.get("alloc", 0),
++                    "avail": pool.get("free", 0),
++                    "refer": pool.get("alloc", 0),
++                    "mountpoint": f"/{pool.get('name', 'unknown')}",
++                }
++                datasets.append(pool_info)
++
++            return self._format_response(datasets, "zfs_datasets")
++        except Exception as e:
++            self._handle_error("list ZFS datasets", e)
++
++    def get_disk_list(self, node: str, include_partitions: bool = False) -> List[Content]:
++        """List all disks on a node.
++
++        Retrieves information about all disks including:
++        - Device path
++        - Size
++        - Serial number
++        - Type (ssd/hdd)
++        - Health status
++        - Current usage (ZFS pool member, etc.)
++
++        Args:
++            node: Node name to query
++            include_partitions: Whether to include partition information
++
++        Returns:
++            List of Content objects containing disk information
++
++        Raises:
++            RuntimeError: If the disk query fails
++        """
++        try:
++            disk_list = self.proxmox.nodes(node).disks.list.get(
++                **{"include-partitions": 1 if include_partitions else 0}
++            )
++
++            disks = []
++            for disk in disk_list:
++                disk_info = {
++                    "devpath": disk.get("devpath", "unknown"),
++                    "size": disk.get("size", 0),
++                    "serial": disk.get("serial", "N/A"),
++                    "type": disk.get("type", "unknown"),
++                    "health": disk.get("health", "UNKNOWN"),
++                    "model": disk.get("model", "N/A"),
++                    "vendor": disk.get("vendor", "N/A"),
++                    "rpm": disk.get("rpm", 0),
++                    "wearout": disk.get("wearout", "N/A"),
++                    "used": disk.get("used", "unused"),
++                }
++                disks.append(disk_info)
++
++            return self._format_response(disks, "disks")
++        except Exception as e:
++            self._handle_error("list disks", e)
++
++    def get_storage_usage(self, node: str, storage: Optional[str] = None) -> List[Content]:
++        """Get detailed storage usage breakdown.
++
++        Shows what's consuming space on storage pools, including:
++        - VM/container disk images and their sizes
++        - Snapshots and their space consumption
++        - Available space per storage
++
++        Args:
++            node: Node name to query
++            storage: Optional specific storage to query (all if not specified)
++
++        Returns:
++            List of Content objects with detailed space usage
++
++        Raises:
++            RuntimeError: If the storage query fails
++        """
++        try:
++            usage_data = []
++
++            # Get storage list for this node
++            storages = self.proxmox.nodes(node).storage.get()
++
++            for store in storages:
++                if storage and store["storage"] != storage:
++                    continue
++
++                store_name = store["storage"]
++
++                # Get content listing (shows all volumes/images)
++                try:
++                    content = self.proxmox.nodes(node).storage(store_name).content.get()
++
++                    # Get storage status for total/used info
++                    try:
++                        status = self.proxmox.nodes(node).storage(store_name).status.get()
++                        total = status.get("total", 0)
++                        used = status.get("used", 0)
++                        avail = status.get("avail", 0)
++                    except Exception:
++                        total = used = avail = 0
++
++                    # Group by type and calculate sizes
++                    volumes = []
++                    for item in content:
++                        volumes.append({
++                            "volid": item.get("volid", "unknown"),
++                            "format": item.get("format", "unknown"),
++                            "size": item.get("size", 0),
++                            "vmid": item.get("vmid"),
++                            "content": item.get("content", "unknown"),
++                            "ctime": item.get("ctime"),
++                        })
++
++                    # Sort by size descending
++                    volumes.sort(key=lambda x: x["size"], reverse=True)
++
++                    usage_data.append({
++                        "storage": store_name,
++                        "type": store.get("type", "unknown"),
++                        "total": total,
++                        "used": used,
++                        "available": avail,
++                        "volumes": volumes,
++                        "volume_count": len(volumes),
++                    })
++                except Exception as e:
++                    self.logger.warning(f"Could not get content for {store_name}: {e}")
++                    continue
++
++            return self._format_response(usage_data, "storage_usage")
++        except Exception as e:
++            self._handle_error("get storage usage", e)
+-- 
+2.53.0.windows.1
+

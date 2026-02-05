@@ -35,6 +35,7 @@ class ProxmoxTheme:
         'snapshot': '📸',
         'template': '📋',
         'pool': '🏊',
+        'zfs': '🗄️',
     }
     
     # Action and operation indicators

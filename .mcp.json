@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ProxmoxMCP-Plus": {
+      "type": "sse",
+      "url": "http://192.168.1.242:8811/sse"
+    },
+    "ssh": {
+      "command": "npx",
+      "args": ["-y", "ssh-mcp"]
+    }
+  }
+}

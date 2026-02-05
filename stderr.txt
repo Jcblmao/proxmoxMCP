@@ -1,0 +1,2 @@
+<frozen runpy>:128: RuntimeWarning: 'proxmox_mcp.server' found in sys.modules after import of package 'proxmox_mcp', but prior to execution of 'proxmox_mcp.server'; this may result in unpredictable behaviour
+PROXMOX_MCP_CONFIG environment variable must be set
