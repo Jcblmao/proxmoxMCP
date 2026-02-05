@@ -275,32 +275,38 @@ class ProxmoxTemplates:
             f"  - State: {pool.get('state', 'UNKNOWN')}",
         ]
 
-        # Add scan info if available
+        # Add scan info if available (must be a dict to extract fields)
         scan = pool.get("scan", {})
-        if scan:
+        if scan and isinstance(scan, dict):
             result.append(f"  - Last Scan: {scan.get('function', 'none')} - {scan.get('state', 'unknown')}")
 
         # Add errors
         errors = pool.get("errors", "No known data errors")
         result.append(f"  - Errors: {errors}")
 
-        # Add disk layout
+        # Add disk layout (must be a list of dicts)
         children = pool.get("children", [])
-        if children:
+        if children and isinstance(children, list):
             result.append("")
             result.append("  Disk Layout:")
             for child in children:
+                if not isinstance(child, dict):
+                    continue
                 child_name = child.get("name", "unknown")
                 child_state = child.get("state", "UNKNOWN")
                 state_icon = "🟢" if child_state == "ONLINE" else "🟡" if child_state == "DEGRADED" else "🔴"
                 result.append(f"    - {child_name}: {state_icon} {child_state}")
 
                 # Nested children (for mirrors, raidz)
-                for subchild in child.get("children", []):
-                    sub_name = subchild.get("name", "unknown")
-                    sub_state = subchild.get("state", "UNKNOWN")
-                    sub_icon = "🟢" if sub_state == "ONLINE" else "🟡" if sub_state == "DEGRADED" else "🔴"
-                    result.append(f"      - {sub_name}: {sub_icon} {sub_state}")
+                nested = child.get("children", [])
+                if isinstance(nested, list):
+                    for subchild in nested:
+                        if not isinstance(subchild, dict):
+                            continue
+                        sub_name = subchild.get("name", "unknown")
+                        sub_state = subchild.get("state", "UNKNOWN")
+                        sub_icon = "🟢" if sub_state == "ONLINE" else "🟡" if sub_state == "DEGRADED" else "🔴"
+                        result.append(f"      - {sub_name}: {sub_icon} {sub_state}")
 
         # Add raw status output if available (fallback when structured data unavailable)
         raw_status = pool.get("raw_status")
